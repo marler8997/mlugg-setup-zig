@@ -1,9 +1,11 @@
 const os = require('os');
 const path = require('path');
 const fs = require('fs').promises;
+const uuidV4 = require('uuid').v4;
 const core = require('@actions/core');
 const tc = require('@actions/tool-cache');
 const cache = require('@actions/cache');
+const exec = require('@actions/exec/lib/exec');
 const common = require('./common');
 const minisign = require('./minisign');
 
@@ -78,6 +80,54 @@ async function retrieveTarball(tarball_name, tarball_ext) {
   return tarball_cache_path;
 }
 
+async function downloadZipCmdline() {
+    let dl_os = os.platform();
+    if (dl_os == 'win32') {
+        dl_os = 'windows';
+    }
+    let dl_arch = os.arch();
+    if (dl_arch == 'x64') {
+        dl_arch = 'x86_64';
+    }
+    let archive_name = `zipcmdline-${dl_arch}-${dl_os}.zip`;
+    const archive_path = await tc.downloadTool(
+        `https://github.com/marler8997/zipcmdline/releases/download/v2024_06_12/${archive_name}`
+    );
+    core.info(`Extracting ${archive_name}`);
+    return await tc.extractZip(archive_path);
+}
+
+async function extractZipFast(file) {
+    if (os.platform() != "win32")
+        return tc.extractZip(file);
+
+    // try first method
+    {
+        let start = Date.now();
+        let old_dir = await tc.extractZip(file);
+        core.info(`tc zip is at ${old_dir}`);
+        let elapsed = Date.now() - start;
+        core.info(`tc.extractZip took ${elapsed} ms`);
+    }
+
+    let start = Date.now();
+    let zip_cmdline = await downloadZipCmdline();
+    let elapsed = Date.now() - start;
+    core.info(`download zipcmdline took ${elapsed} ms`);
+    let tmp_dir = process.env['RUNNER_TEMP'];
+    if (!tmp_dir) {
+        throw 'Missing RUNNER_TEMP environment variable';
+    }
+    let dest = path.join(tmp_dir, uuidV4());
+
+    start = Date.now();
+    await exec.exec(`"${zip_cmdline}/unzip.exe"`, ["-d", dest, file]);
+    elapsed = Date.now() - start;
+    core.info(`unzip took ${elapsed} ms`);
+
+    return dest;
+}
+
 async function main() {
   try {
     // We will check whether Zig is stored in the cache. We use two separate caches.
@@ -96,8 +146,8 @@ async function main() {
 
       core.info(`Extracting tarball ${tarball_name}${tarball_ext}`);
 
-      const zig_parent_dir = tarball_ext === 'zip' ?
-        await tc.extractZip(tarball_path) :
+      const zig_parent_dir = tarball_ext === '.zip' ?
+        await extractZipFast(tarball_path) :
         await tc.extractTar(tarball_path, null, 'xJ'); // J for xz
 
       const zig_inner_dir = path.join(zig_parent_dir, tarball_name);
